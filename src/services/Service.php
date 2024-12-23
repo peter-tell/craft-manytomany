@@ -10,6 +10,7 @@ use craft\db\Query;
 use craft\db\Table;
 use craft\elements\Entry;
 use craft\helpers\Db;
+use craft\helpers\ElementHelper;
 use craft\models\Section;
 
 class Service extends Component
@@ -52,6 +53,13 @@ class Service extends Component
      */
     public function saveRelationship(ManyToManyField $fieldType, ElementInterface $element): void
     {
+        if (ElementHelper::isDraftOrRevision($element)) {
+            return;
+        }
+        
+        $cacheKey = implode('--', ['many-to-many', $fieldType->handle, $element->canonicalUid]);
+        $content = Craft::$app->getCache()->get($cacheKey);
+
         // Get element ID of the current element. Be sure to use the canonicalId when dealing with autosave
         $targetId = $element->getCanonicalId();
 
@@ -59,9 +67,6 @@ class Service extends Component
         Craft::$app->getElements()->invalidateCachesForElement($element);
 
         // Get submitted field value - note that we're fetching `rawValue` not the normalized value
-        // $content = $fieldType->rawValue;
-        $cacheKey = implode('--', ['many-to-many', $fieldType->handle, $element->uid]);
-        $content = Craft::$app->getCache()->get($cacheKey);
         Craft::$app->getCache()->delete($cacheKey);
 
         // There are 3 Items we need to make up a unique relationship in the craft_relations table:
@@ -70,56 +75,29 @@ class Service extends Component
         // targetId --> $elementId, this is the reverse of the relationship
         $fieldId = Db::idByUid(Table::FIELDS, $fieldType->singleField);
 
+        $field = Craft::$app->fields->getFieldByUid($fieldType->singleField); 
+
         // The relationships we either want to add or leave
-        $toAdd = $content['add'] ?? [];
+        $toAdd = !empty($content['add']) ? $content['add'] : [];
 
         // The relationships we want to remove
-        $toDelete = $content['delete'] ?? [];
+        $toDelete = !empty($content['delete']) ? $content['delete'] : [];
 
-        // First handle adding or updating the relationships that have to exist
-        if (is_array($toAdd)) {
-            foreach ($toAdd as $sourceId) {
-                // Check if relation exists
-                $exists = (new Query())
-                    ->select('id')
-                    ->from('{{%relations}}')
-                    ->where('[[fieldId]] = :fieldId', [':fieldId' => $fieldId])
-                    ->andWhere('[[sourceId]] = :sourceId', [':sourceId' => $sourceId])
-                    ->andWhere('[[targetId]] = :targetId', [':targetId' => $targetId])
-                    ->exists();
-
-                // Create relation if it does not exist
-                if (!$exists) {
-                    $columns = [
-                        'fieldId' => $fieldId,
-                        'sourceId' => $sourceId,
-                        'sourceSiteId' => null,
-                        'targetId' => $targetId,
-                        'sortOrder' => 1,
-                    ];
-
-                    Db::insert('{{%relations}}', $columns);
-                }
-            }
+        foreach ($toAdd as $sourceId) {
+            $sourceElement = Entry::find()->id($sourceId)->one();
+            $currentRelations = array_map(fn($r) => $r->Id, $sourceElement->getFieldValue($field->handle)->all());
+            $currentRelations = array_unique(array_merge($currentRelations, [$targetId]));
+            $sourceElement->setFieldValue($field->handle, $currentRelations);
+            Craft::$app->elements->saveElement($sourceElement);
+        }
+        
+        foreach ($toDelete as $sourceId) {
+            $sourceElement = Entry::find()->id($sourceId)->one();
+            $currentRelations = array_map(fn($r) => $r->Id, $sourceElement->getFieldValue($field->handle)->all());
+            $currentRelations = array_filter($currentRelations, fn($r) => $r != $targetId);
+            $sourceElement->setFieldValue($field->handle, $currentRelations);
+            Craft::$app->elements->saveElement($sourceElement);
         }
 
-        // Now, delete the existing relationships if the user removed them.
-        if (is_array($toDelete)) {
-            foreach ($toDelete as $sourceId) {
-                $oldRelationConditions = [
-                    'and',
-                    '[[fieldId]] = :fieldId',
-                    '[[sourceId]] = :sourceId',
-                    '[[targetId]] = :targetId',
-                ];
-                $oldRelationParams = [
-                    ':fieldId' => $fieldId,
-                    ':sourceId' => $sourceId,
-                    ':targetId' => $targetId,
-                ];
-
-                Db::delete('{{%relations}}', $oldRelationConditions, $oldRelationParams);
-            }
-        }
     }
 }
