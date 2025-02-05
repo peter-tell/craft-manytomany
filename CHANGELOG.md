@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.0.2 - 2025-02-05
+
+### Fixed
+- Craft 5 updates and fixes.
+
 ## 4.0.1 - 2024-09-07
 
 ### Added
